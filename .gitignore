@@ -1,0 +1,24 @@
+# --- Secrets: NEVER commit these ---
+google_credentials.json
+google_token.json
+.env
+*.key
+
+# --- Personal / generated data ---
+owner_voiceprint.npy
+conversations/
+*.log
+
+# --- Python virtual env & bytecode ---
+aiy_env/
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Claude Code personal settings (machine-specific) ---
+.claude/settings.local.json

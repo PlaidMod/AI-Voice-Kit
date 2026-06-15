@@ -1,0 +1,38 @@
+# Python dependencies for Scout (AIY Voice Kit V1 voice assistant).
+#
+# Install with:  pip3 install -r requirements.txt
+#
+# NOTE: The `aiy` library (aiy.board, aiy.voice.audio, aiy.voice.tts) is NOT
+# listed here. On the old AIY system image it was preinstalled; on a modern
+# 64-bit Raspberry Pi OS you install it from the GitHub source into this venv.
+
+# --- OpenAI API (GPT-5.5 + server-side web_search tool) ---
+# Leave UNPINNED so pip pulls a recent SDK. Scout uses the Responses API
+# (client.responses.create) and the hosted web_search tool; an old openai
+# package won't have client.responses at all, so a fresh install is important.
+openai
+
+# --- Wake word "Hello Claude" (low-CPU, always-on) ---
+pvporcupine        # wake-word engine
+pvrecorder         # microphone capture that feeds Porcupine
+
+# --- Local speech-to-text. Pulls in PyTorch: large + slow to install on a
+#     Pi 3B. Use the "tiny" or "base" model. ---
+openai-whisper
+
+# --- Speaker verification (only the owner gets answers). Pulls in torch,
+#     librosa, webrtcvad. ---
+resemblyzer
+
+# --- Saving opportunities to a Google Sheet ---
+google-api-python-client
+google-auth
+google-auth-oauthlib
+
+# --- Math/audio helper used throughout. Pinned <2: resemblyzer and the
+#     librosa it pulls in predate the numpy 2.0 ABI break, and a fresh venv
+#     otherwise grabs numpy 2.x and crashes on import. ---
+numpy<2
+
+# --- Fallback text-to-speech, used only if aiy.voice.tts is unavailable ---
+pyttsx3
