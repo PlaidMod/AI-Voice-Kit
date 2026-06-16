@@ -141,6 +141,19 @@ def _generate(client, **kwargs):
     return response
 
 
+def _thinking_config():
+    """Turn off 'thinking' for fast voice replies, in a model-safe way.
+
+    Gemini 2.5 disables thinking with thinking_budget=0. Gemini 3 models use a
+    different API (thinking_level) and reject thinking_budget, so for anything
+    that isn't 2.5 we omit it and take the model's default. Lets SCOUT_MODEL be
+    switched (e.g. to a Gemini 3 flash-lite) without a 400 on this parameter.
+    """
+    if config.MODEL.startswith("gemini-2.5"):
+        return types.ThinkingConfig(thinking_budget=0)
+    return None
+
+
 def transcribe(client, audio, sample_rate):
     """Transcribe a mono float32 [-1, 1] clip with Gemini; return plain text.
 
@@ -168,7 +181,7 @@ def transcribe(client, audio, sample_rate):
         "If there is no clear speech, return nothing."
     )
     cfg = types.GenerateContentConfig(
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        thinking_config=_thinking_config(),
         temperature=0.0,
     )
     response = _generate(
@@ -277,7 +290,7 @@ def respond(client, system_prompt, base_messages, question, ctx):
         system_instruction=dated_prompt,
         tools=[FUNCTION_TOOLS],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        thinking_config=_thinking_config(),
         max_output_tokens=config.MAX_TOKENS,
     )
 
