@@ -16,23 +16,26 @@ google-genai
 pvporcupine        # wake-word engine
 pvrecorder         # microphone capture that feeds Porcupine
 
-# --- Local speech-to-text. Pulls in PyTorch: large + slow to install on a
-#     Pi 3B. Use the "tiny" or "base" model. ---
-openai-whisper
+# --- Speech-to-text now runs in the cloud via Gemini (see assistant.transcribe).
+#     openai-whisper was removed: it was far too slow/inaccurate on a Pi 3B and
+#     hogged the limited RAM. Nothing to install for STT. ---
 
 # --- Speaker verification (only the owner gets answers). Pulls in torch,
 #     librosa, webrtcvad. ---
 resemblyzer
+
+# --- Neural text-to-speech (clear voice, runs well on ARM). ---
+piper-tts
 
 # --- Saving opportunities to a Google Sheet ---
 google-api-python-client
 google-auth
 google-auth-oauthlib
 
-# --- Math/audio helper used throughout. Pinned <2: resemblyzer and the
-#     librosa it pulls in predate the numpy 2.0 ABI break, and a fresh venv
-#     otherwise grabs numpy 2.x and crashes on import. ---
-numpy<2
+# --- Math/audio helper used throughout. numpy 2.x works fine on Python 3.13;
+#     the old <2 pin has no wheel for Python 3.13 and forces a slow source
+#     build that fails on ARM. ---
+numpy
 
 # --- Fallback text-to-speech, used only if aiy.voice.tts is unavailable ---
 pyttsx3

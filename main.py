@@ -6,13 +6,14 @@ What happens:
   * Idle: the button LED slowly PULSES, meaning "I'm listening for you."
   * You say "Hello Claude" (or press the button) -> Scout greets you, LED solid.
   * You ask your question -> it records until you stop talking.
-  * It checks the voice is YOURS, transcribes locally with Whisper, then asks
+  * It checks the voice is YOURS, transcribes the audio with Gemini, then asks
     Gemini 2.5 Flash (with web search + Google Sheet saving + chat memory).
   * It speaks back a 3-5 bullet answer, then goes back to the pulsing idle state.
 
 The pieces live in separate files: config, listener (mic + wake word),
-voice_id (speaker check), assistant (Gemini + tools), chats (memory),
-google_sync (Sheets). This file just orchestrates them.
+voice_id (speaker check), assistant (Gemini transcription + answer + tools),
+chats (memory), google_sync (Sheets), volume (voice-set speaker level). This
+file just orchestrates them.
 """
 
 import io
@@ -32,7 +33,8 @@ import config
 import chats
 import usage
 import voice_id
-from assistant import ToolContext, respond
+import volume
+from assistant import ToolContext, respond, transcribe
 from listener import Listener
 
 # --- Text-to-speech: Piper (neural) → AIY pico2wave → pyttsx3/espeak ------
@@ -86,10 +88,26 @@ def _speak_piper(text):
                 _piper_voice.synthesize(text, wf)
         if os.path.getsize(tmp_path) <= 44:                  # header only = no audio
             raise RuntimeError("Piper produced no audio frames")
-        subprocess.run(["aplay", "-q", "-D", "plughw:0,0", tmp_path],
+        _apply_gain(tmp_path, volume.get())                  # voice-set volume
+        subprocess.run(["aplay", "-q", "-D", config.PLAYBACK_DEVICE, tmp_path],
                        stderr=subprocess.DEVNULL)
     finally:
         os.unlink(tmp_path)
+
+
+def _apply_gain(path, gain):
+    """Scale a WAV's samples in place by `gain` (skip the no-op of 1.0)."""
+    if abs(gain - 1.0) < 1e-3:
+        return
+    import numpy as np
+    with wave.open(path, "rb") as wf:
+        params = wf.getparams()
+        frames = wf.readframes(wf.getnframes())
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) * gain
+    samples = np.clip(samples, -32768, 32767).astype("<i2")
+    with wave.open(path, "wb") as wf:
+        wf.setparams(params)
+        wf.writeframes(samples.tobytes())
 
 
 def _speak_pyttsx3(text):
@@ -184,10 +202,8 @@ def main():
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-    print(f"Loading Whisper '{config.WHISPER_MODEL}' (this can take a minute)...")
-    import whisper
-    whisper_model = whisper.load_model(config.WHISPER_MODEL)
-    print("Whisper ready.")
+    # Speech-to-text runs in the cloud via Gemini (see assistant.transcribe) --
+    # far faster and more accurate on a Pi 3B than loading Whisper locally.
 
     if not voice_id.has_voiceprint():
         print("NOTE: no voiceprint found -- speaker lock is OFF. Run enroll.py to lock it to your voice.")
@@ -243,29 +259,21 @@ def main():
                     speak(REFUSAL)
                     continue
 
-                # ---- TRANSCRIBE locally (no internet needed for this step). ----
-                try:
-                    result = whisper_model.transcribe(audio, fp16=False, language="en")
-                    question = result["text"].strip()
-                except Exception as e:
-                    print(f"Transcription failed: {e}")
-                    speak("Sorry, I couldn't make out the audio. Try again.")
-                    continue
-
-                if not question:
-                    speak(f"I didn't catch that. {retry_hint}")
-                    continue
-                print(f"You said: {question}")
-
-                # ---- If the free quota is already spent, don't hammer the API. ----
+                # ---- If the free quota is already spent, don't hit the API. ----
+                # (Both transcription and the answer are Gemini calls now.)
                 if usage.is_exhausted():
                     speak("You're still out of free Gemini credits for today. "
                           "They reset tomorrow, so try me again then.")
                     continue
 
-                # ---- ASK GEMINI (web search + tools). ----
+                # ---- TRANSCRIBE with Gemini, then ASK Gemini (web search + tools). ----
                 ctx = ToolContext()
                 try:
+                    question = transcribe(client, audio, config.SAMPLE_RATE)
+                    if not question:
+                        speak(f"I didn't catch that. {retry_hint}")
+                        continue
+                    print(f"You said: {question}")
                     answer = respond(client, system_prompt, current.messages, question, ctx)
                 except errors.APIError as e:
                     if getattr(e, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e):

@@ -101,6 +101,23 @@ FUNCTION_DECLARATIONS = [
             "properties": {},
         },
     },
+    {
+        "name": "set_volume",
+        "description": (
+            "Change Scout's speaker volume when the user asks (e.g. 'turn it up', "
+            "'louder', 'quieter', 'set volume to 70 percent'). Use 'level' for an "
+            "absolute target percent (0-200, where 100 is normal), OR 'change' for "
+            "a relative step in percentage points (positive = louder, negative = "
+            "quieter). Then confirm the new level in one short bullet."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "integer", "description": "Absolute target volume percent, 0-200"},
+                "change": {"type": "integer", "description": "Relative change in points, e.g. 20 or -20"},
+            },
+        },
+    },
 ]
 
 FUNCTION_TOOLS = types.Tool(function_declarations=FUNCTION_DECLARATIONS)
@@ -122,6 +139,45 @@ def _generate(client, **kwargs):
     response = client.models.generate_content(**kwargs)
     usage.record()
     return response
+
+
+def transcribe(client, audio, sample_rate):
+    """Transcribe a mono float32 [-1, 1] clip with Gemini; return plain text.
+
+    Runs on-device speech-to-text by sending the audio to Gemini instead of
+    Whisper -- far faster and more accurate than local Whisper on a Pi 3B, and
+    it frees the RAM Whisper used. Counts as one request against the free quota.
+    May raise google.genai.errors.APIError (e.g. a 429), which main.py handles.
+    """
+    import io
+    import wave
+    import numpy as np
+
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+
+    audio_part = types.Part.from_bytes(data=buf.getvalue(), mime_type="audio/wav")
+    instruction = (
+        "Transcribe the user's spoken question from this audio, in English. "
+        "Return ONLY the exact words spoken -- no quotes, labels, or commentary. "
+        "If there is no clear speech, return nothing."
+    )
+    cfg = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        temperature=0.0,
+    )
+    response = _generate(
+        client,
+        model=config.MODEL,
+        contents=[instruction, audio_part],
+        config=cfg,
+    )
+    return (response.text or "").strip()
 
 
 def _grounded_search(client, query):
@@ -180,6 +236,16 @@ def _run_tool(client, name, args, ctx):
     if name == "start_new_chat":
         ctx.start_new = True
         return "Started a new, empty conversation."
+
+    if name == "set_volume":
+        import volume
+        current_pct = volume.get() * 100
+        if args.get("level") is not None:
+            target_pct = float(args["level"])
+        else:
+            target_pct = current_pct + float(args.get("change", 0))
+        new_pct = volume.set(target_pct / 100.0) * 100
+        return f"Volume is now {int(round(new_pct))} percent."
 
     return f"Unknown tool: {name}"
 

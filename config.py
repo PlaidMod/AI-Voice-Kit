@@ -94,3 +94,12 @@ PIPER_MODEL_PATH = os.environ.get(
     "SCOUT_PIPER_MODEL",
     os.path.join(BASE_DIR, "piper-voices", "en_US-lessac-medium.onnx")
 )
+# ALSA device for playback (the Voice HAT is card 0 on this kit).
+PLAYBACK_DEVICE = os.environ.get("SCOUT_PLAYBACK_DEVICE", "plughw:0,0")
+
+# --- Volume (voice-controlled, applied as software gain on TTS output) -----
+# 1.0 = normal, 0.0 = silent, up to MAX_VOLUME for a boost (boosting above 1.0
+# can distort since it clips). Persisted in volume.json so it survives restarts.
+DEFAULT_VOLUME = float(os.environ.get("SCOUT_VOLUME", "1.0"))
+MAX_VOLUME = float(os.environ.get("SCOUT_MAX_VOLUME", "2.0"))
+VOLUME_PATH = os.path.join(BASE_DIR, "volume.json")

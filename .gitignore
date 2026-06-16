@@ -8,6 +8,7 @@ google_token.json
 owner_voiceprint.npy
 conversations/
 usage.json
+volume.json
 *.log
 
 # --- Python virtual env & bytecode ---
