@@ -1,37 +1,55 @@
 """
-The brain. Sends the conversation to GPT-5.5 (OpenAI Responses API) and runs
-the tool loop.
+The brain. Sends the conversation to Gemini 2.5 Flash (google-genai SDK) and
+runs the tool loop.
 
-Tools the model can use:
-  * web_search        - built in, runs on OpenAI's servers (find live info)
-  * save_opportunity  - we run it: append a row to the Google Sheet
-  * list_recent_chats - we run it: read back saved conversations
-  * continue_chat     - we run it: switch to an older conversation
-  * start_new_chat    - we run it: begin a fresh conversation
+Tools the model can use (all are "function tools" we run here on the Pi):
+  * web_search        - we run a SEPARATE, Google-Search-grounded Gemini call
+  * save_opportunity  - append a row to the Google Sheet
+  * list_recent_chats - read back saved conversations
+  * continue_chat     - switch to an older conversation
+  * start_new_chat    - begin a fresh conversation
 
-web_search is a "hosted tool": OpenAI runs it server-side inside a single
-create() call and folds the sourced results straight into the answer. The other
-four are "function tools" -- the model asks for them, we run them here on the
-Pi, hand the text result back, and let it keep going.
+Why web_search is a function tool instead of built-in grounding: gemini-2.5-flash
+CANNOT use the built-in google_search tool and custom function tools in the SAME
+request (only the Gemini 3 series can). So we keep all of Scout's custom tools on
+the main call, and when the model asks to search we satisfy it with a second,
+grounding-only call. Every individual API call therefore uses either grounding OR
+functions -- never both -- which is what 2.5 allows. As a bonus, search only runs
+when the model actually needs it, which is gentle on the free daily quota.
 """
 
-import json
 from datetime import date
+
+from google import genai  # noqa: F401  (kept for clarity; client is passed in)
+from google.genai import types
 
 import config
 import chats
 import google_sync
+import usage
 
 
 # ---- Tool definitions handed to the model ---------------------------------
 
-# Hosted web search. OpenAI executes this server-side and returns sourced
-# answers; there is no per-call cap to set here (unlike the old Anthropic tool).
-WEB_SEARCH_TOOL = {"type": "web_search"}
-
-CUSTOM_TOOLS = [
+FUNCTION_DECLARATIONS = [
     {
-        "type": "function",
+        "name": "web_search",
+        "description": (
+            "Search the live web (Google) for current information such as "
+            "deadlines, openings, dates, prices, or specific organizations. You "
+            "have NO other internet access, so you MUST call this before stating "
+            "anything time-sensitive or anything you are not sure of. Pass a "
+            "focused search query."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "save_opportunity",
         "description": (
             "Save one opportunity (program, internship, competition, research, "
@@ -49,11 +67,9 @@ CUSTOM_TOOLS = [
                 "why_relevant": {"type": "string", "description": "One line on why it fits this student"},
             },
             "required": ["name"],
-            "additionalProperties": False,
         },
     },
     {
-        "type": "function",
         "name": "list_recent_chats",
         "description": "List the user's recent saved conversations so they can pick one to continue.",
         "parameters": {
@@ -61,12 +77,9 @@ CUSTOM_TOOLS = [
             "properties": {
                 "limit": {"type": "integer", "description": "How many to list (default 8)"},
             },
-            "required": [],
-            "additionalProperties": False,
         },
     },
     {
-        "type": "function",
         "name": "continue_chat",
         "description": (
             "Switch to an older conversation so the next questions continue it. "
@@ -78,23 +91,19 @@ CUSTOM_TOOLS = [
                 "chat_id": {"type": "string", "description": "The id of the chat to continue"},
             },
             "required": ["chat_id"],
-            "additionalProperties": False,
         },
     },
     {
-        "type": "function",
         "name": "start_new_chat",
         "description": "Start a brand new, empty conversation (forget the current topic).",
         "parameters": {
             "type": "object",
             "properties": {},
-            "required": [],
-            "additionalProperties": False,
         },
     },
 ]
 
-ALL_TOOLS = [WEB_SEARCH_TOOL] + CUSTOM_TOOLS
+FUNCTION_TOOLS = types.Tool(function_declarations=FUNCTION_DECLARATIONS)
 
 # Safety net so a confused tool loop can never spin forever on the Pi.
 MAX_TOOL_ROUNDS = 8
@@ -108,26 +117,60 @@ class ToolContext:
         self.start_new = False   # start a fresh chat after this turn, if True
 
 
-def _run_custom_tool(name, tool_input, ctx):
-    """Execute one function tool and return a text result for the model."""
+def _generate(client, **kwargs):
+    """Make one Gemini request and count it against today's free quota."""
+    response = client.models.generate_content(**kwargs)
+    usage.record()
+    return response
+
+
+def _grounded_search(client, query):
+    """Answer `query` with a separate Google-Search-grounded Gemini call."""
+    cfg = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+    response = _generate(client, model=config.MODEL, contents=query, config=cfg)
+    text = (response.text or "").strip()
+
+    # Pull source titles so the main model can name them out loud.
+    sources = []
+    try:
+        chunks = response.candidates[0].grounding_metadata.grounding_chunks or []
+        for chunk in chunks:
+            title = getattr(getattr(chunk, "web", None), "title", None)
+            if title and title not in sources:
+                sources.append(title)
+    except (AttributeError, IndexError, TypeError):
+        pass
+    if sources:
+        text += "\n\nSources: " + "; ".join(sources[:5])
+
+    return text or "The search came back empty."
+
+
+def _run_tool(client, name, args, ctx):
+    """Execute one function call and return a text result for the model."""
+    if name == "web_search":
+        return _grounded_search(client, args.get("query", ""))
+
     if name == "save_opportunity":
         return google_sync.append_opportunity(
-            name=tool_input.get("name", ""),
-            deadline=tool_input.get("deadline", ""),
-            eligibility=tool_input.get("eligibility", ""),
-            link=tool_input.get("link", ""),
-            why=tool_input.get("why_relevant", ""),
+            name=args.get("name", ""),
+            deadline=args.get("deadline", ""),
+            eligibility=args.get("eligibility", ""),
+            link=args.get("link", ""),
+            why=args.get("why_relevant", ""),
         )
 
     if name == "list_recent_chats":
-        recent = chats.list_recent(limit=tool_input.get("limit", 8))
+        recent = chats.list_recent(limit=args.get("limit", 8))
         if not recent:
             return "There are no saved conversations yet."
         lines = [f"{c['title']} (id: {c['id']}, {c['when']})" for c in recent]
         return "Recent conversations:\n" + "\n".join(lines)
 
     if name == "continue_chat":
-        chat_id = tool_input.get("chat_id", "")
+        chat_id = args.get("chat_id", "")
         conv = chats.load(chat_id)
         if conv is None:
             return f"No conversation with id {chat_id}. Use list_recent_chats first."
@@ -141,52 +184,55 @@ def _run_custom_tool(name, tool_input, ctx):
     return f"Unknown tool: {name}"
 
 
+def _text_from(parts):
+    """Concatenate the spoken text out of a list of response parts."""
+    return "".join(p.text for p in (parts or []) if getattr(p, "text", None)).strip()
+
+
 def respond(client, system_prompt, base_messages, question, ctx):
     """
-    Ask GPT-5.5 and return the final spoken answer text.
+    Ask Gemini and return the final spoken answer text.
 
     `base_messages` is the current chat's simple history (a list of
-    {"role", "content"} dicts). We build a working input list for this turn
-    that grows with the model's own output items and our tool results; only the
-    final answer text gets saved back into history (in main.py).
-
-    web_search is resolved server-side within each create() call, so the loop
-    below only has to handle our four function tools.
+    {"role", "content"} dicts, where role is "user" or "assistant"). We map it
+    to Gemini's Content list (assistant -> "model"), then grow it with the
+    model's tool calls and our results; only the final answer text gets saved
+    back into history (in main.py).
     """
-    # Give the model today's date so it can reason about deadlines correctly.
     dated_prompt = f"Today's date is {date.today():%A, %B %d, %Y}.\n\n{system_prompt}"
 
-    input_list = list(base_messages) + [{"role": "user", "content": question}]
+    contents = []
+    for msg in base_messages:
+        role = "model" if msg["role"] == "assistant" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
+
+    cfg = types.GenerateContentConfig(
+        system_instruction=dated_prompt,
+        tools=[FUNCTION_TOOLS],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        max_output_tokens=config.MAX_TOKENS,
+    )
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.responses.create(
-            model=config.MODEL,
-            instructions=dated_prompt,
-            tools=ALL_TOOLS,
-            input=input_list,
-            max_output_tokens=config.MAX_TOKENS,
-        )
+        response = _generate(client, model=config.MODEL, contents=contents, config=cfg)
+        candidate = response.candidates[0]
+        parts = candidate.content.parts or []
 
-        # Carry the model's full output forward so any tool calls (and the
-        # reasoning tied to them) stay linked on the next round.
-        input_list += response.output
+        calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
+        if not calls:
+            return _text_from(parts) or "I'm not sure how to answer that. Could you rephrase?"
 
-        tool_calls = [item for item in response.output
-                      if getattr(item, "type", None) == "function_call"]
-        if not tool_calls:
-            text = (response.output_text or "").strip()
-            return text or "I'm not sure how to answer that. Could you rephrase?"
-
-        for call in tool_calls:
-            try:
-                args = json.loads(call.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            output = _run_custom_tool(call.name, args, ctx)
-            input_list.append({
-                "type": "function_call_output",
-                "call_id": call.call_id,
-                "output": output,
-            })
+        # Keep the model's tool-call turn, then answer each call it made.
+        contents.append(candidate.content)
+        result_parts = []
+        for fc in calls:
+            args = dict(fc.args) if fc.args else {}
+            output = _run_tool(client, fc.name, args, ctx)
+            result_parts.append(
+                types.Part.from_function_response(name=fc.name, response={"result": output})
+            )
+        contents.append(types.Content(role="user", parts=result_parts))
 
     return "I got a bit stuck working through that. Mind asking it a different way?"

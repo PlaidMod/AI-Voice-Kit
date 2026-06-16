@@ -10,15 +10,23 @@ import os
 # Folder this file lives in. All data files sit next to the code.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- OpenAI (GPT-5.5) -----------------------------------------------------
-# Override the model with SCOUT_MODEL if your OpenAI account exposes a different
-# string (e.g. a dated or "pro" variant). gpt-5.5 has a 1M-token context window
-# and supports the server-side web_search tool.
-MODEL = os.environ.get("SCOUT_MODEL", "gpt-5.5")
-# Ceiling for one answer. NOTE: on GPT-5 reasoning models this budget also
-# covers the model's hidden reasoning tokens, so keep generous headroom above
-# the few spoken bullets we want, or the visible answer can come back empty.
+# --- Google Gemini (gemini-2.5-flash) -------------------------------------
+# Override with SCOUT_MODEL if you want a different Gemini model string.
+MODEL = os.environ.get("SCOUT_MODEL", "gemini-2.5-flash")
+# Ceiling on output tokens for one answer (answers are only a few bullets).
 MAX_TOKENS = int(os.environ.get("SCOUT_MAX_TOKENS", "2000"))
+
+# --- Free-tier usage tracking (Gemini daily request quota) ----------------
+# Google's free tier is a daily REQUEST limit, not a dollar balance, and it has
+# moved around a lot through 2026 (roughly 250-1500 requests/day). Set this to
+# match what your key shows in Google AI Studio so the early "about to run out"
+# warning is accurate. The real "you're out" alert is driven by the API's own
+# 429, so this number only affects the proactive heads-up.
+FREE_TIER_DAILY_LIMIT = int(os.environ.get("SCOUT_FREE_DAILY_LIMIT", "250"))
+# Speak a heads-up once this fraction of the daily limit has been used.
+FREE_WARN_FRACTION = float(os.environ.get("SCOUT_FREE_WARN_FRACTION", "0.9"))
+# Where the local daily request counter lives.
+USAGE_PATH = os.path.join(BASE_DIR, "usage.json")
 
 # --- Whisper (local speech-to-text) ---------------------------------------
 # "tiny" = fastest, "base" = more accurate. Override with SCOUT_WHISPER_MODEL.

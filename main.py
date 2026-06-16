@@ -7,11 +7,11 @@ What happens:
   * You say "Hello Claude" (or press the button) -> Scout greets you, LED solid.
   * You ask your question -> it records until you stop talking.
   * It checks the voice is YOURS, transcribes locally with Whisper, then asks
-    GPT-5.5 (with web search + Google Sheet saving + chat memory).
+    Gemini 2.5 Flash (with web search + Google Sheet saving + chat memory).
   * It speaks back a 3-5 bullet answer, then goes back to the pulsing idle state.
 
 The pieces live in separate files: config, listener (mic + wake word),
-voice_id (speaker check), assistant (GPT-5.5 + tools), chats (memory),
+voice_id (speaker check), assistant (Gemini + tools), chats (memory),
 google_sync (Sheets). This file just orchestrates them.
 """
 
@@ -20,13 +20,14 @@ import random
 import sys
 import threading
 
-import openai
-from openai import OpenAI
+from google import genai
+from google.genai import errors
 
 from aiy.board import Board, Led
 
 import config
 import chats
+import usage
 import voice_id
 from assistant import ToolContext, respond
 from listener import Listener
@@ -111,8 +112,8 @@ def start_button_thread(board, button_event):
 
 def main():
     # --- Required keys up front, before anything slow loads. ---
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY is not set. See the setup steps.", file=sys.stderr)
+    if not os.environ.get("GEMINI_API_KEY"):
+        print("ERROR: GEMINI_API_KEY is not set. See the setup steps.", file=sys.stderr)
         sys.exit(1)
     if not config.PICOVOICE_ACCESS_KEY:
         print("ERROR: PICOVOICE_ACCESS_KEY is not set (needed for the wake word).", file=sys.stderr)
@@ -124,7 +125,7 @@ def main():
     with open(config.SYSTEM_PROMPT_PATH, encoding="utf-8") as f:
         system_prompt = f.read()
 
-    client = OpenAI()
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     print(f"Loading Whisper '{config.WHISPER_MODEL}' (this can take a minute)...")
     import whisper
@@ -190,13 +191,25 @@ def main():
                     continue
                 print(f"You said: {question}")
 
-                # ---- ASK CLAUDE (web search + tools). ----
+                # ---- If the free quota is already spent, don't hammer the API. ----
+                if usage.is_exhausted():
+                    speak("You're still out of free Gemini credits for today. "
+                          "They reset tomorrow, so try me again then.")
+                    continue
+
+                # ---- ASK GEMINI (web search + tools). ----
                 ctx = ToolContext()
                 try:
                     answer = respond(client, system_prompt, current.messages, question, ctx)
-                except openai.OpenAIError as e:
-                    print(f"OpenAI API error: {e}")
-                    speak("I had trouble reaching the assistant. Please try again.")
+                except errors.APIError as e:
+                    if getattr(e, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e):
+                        usage.mark_exhausted()
+                        print("Gemini free daily quota exhausted (429).")
+                        speak("You've used all of today's free Gemini credits. "
+                              "They reset tomorrow, so I can't answer until then.")
+                    else:
+                        print(f"Gemini API error: {e}")
+                        speak("I had trouble reaching the assistant. Please try again.")
                     continue
 
                 # Save this Q&A into the active conversation.
@@ -207,6 +220,12 @@ def main():
                 print(f"Scout: {answer}")
                 board.led.state = Led.ON
                 speak(clean_for_speech(answer))
+
+                # ---- Heads-up as the free daily quota runs low. ----
+                if usage.should_announce_warning():
+                    pct = int(usage.fraction_used() * 100)
+                    speak(f"Quick heads-up: you've used about {pct} percent "
+                          "of today's free Gemini requests.")
 
                 # ---- Apply any chat switch the model asked for. ----
                 if ctx.start_new:

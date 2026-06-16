@@ -6,11 +6,11 @@
 # listed here. On the old AIY system image it was preinstalled; on a modern
 # 64-bit Raspberry Pi OS you install it from the GitHub source into this venv.
 
-# --- OpenAI API (GPT-5.5 + server-side web_search tool) ---
-# Leave UNPINNED so pip pulls a recent SDK. Scout uses the Responses API
-# (client.responses.create) and the hosted web_search tool; an old openai
-# package won't have client.responses at all, so a fresh install is important.
-openai
+# --- Google Gemini API (gemini-2.5-flash + Google Search grounding) ---
+# Leave UNPINNED so pip pulls a recent SDK. Scout uses the NEW google-genai SDK
+# (from google import genai), function calling, and google_search grounding.
+# The older "google-generativeai" package is a different API and will NOT work.
+google-genai
 
 # --- Wake word "Hello Claude" (low-CPU, always-on) ---
 pvporcupine        # wake-word engine
