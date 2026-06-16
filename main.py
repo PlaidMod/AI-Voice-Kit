@@ -115,12 +115,18 @@ def main():
     if not os.environ.get("GEMINI_API_KEY"):
         print("ERROR: GEMINI_API_KEY is not set. See the setup steps.", file=sys.stderr)
         sys.exit(1)
-    if not config.PICOVOICE_ACCESS_KEY:
-        print("ERROR: PICOVOICE_ACCESS_KEY is not set (needed for the wake word).", file=sys.stderr)
-        sys.exit(1)
-    if not os.path.exists(config.WAKE_KEYWORD_PATH):
-        print(f"ERROR: wake word file not found at {config.WAKE_KEYWORD_PATH}", file=sys.stderr)
-        sys.exit(1)
+
+    # The wake word is optional. It turns on automatically once a Picovoice key
+    # and the "Hello Claude" keyword file are both present; until then Scout runs
+    # button-only. Force it either way with SCOUT_WAKE_WORD=on / off.
+    wake_on = config.wake_word_enabled()
+    if wake_on:
+        if not config.PICOVOICE_ACCESS_KEY or not os.path.exists(config.WAKE_KEYWORD_PATH):
+            print("ERROR: wake word is on but the Picovoice key or 'Hello Claude' "
+                  "keyword file is missing.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("Wake word OFF (no Picovoice key/keyword file) -- press the button to talk.")
 
     with open(config.SYSTEM_PROMPT_PATH, encoding="utf-8") as f:
         system_prompt = f.read()
@@ -141,10 +147,17 @@ def main():
     listener = Listener()
     button_event = threading.Event()
 
+    # How to tell Scout to listen again -- phrased to match the active trigger.
+    retry_hint = "Say Hello Claude to try again." if wake_on else "Press the button to try again."
+
     with Board() as board:
         start_button_thread(board, button_event)
-        speak("Scout is online.")
-        print("Idle. Say 'Hello Claude' or press the button. Ctrl+C to quit.")
+        if wake_on:
+            speak("Scout is online. Say Hello Claude, or press the button.")
+            print("Idle. Say 'Hello Claude' or press the button. Ctrl+C to quit.")
+        else:
+            speak("Scout is online. Press the button to talk to me.")
+            print("Idle. Press the button to talk. Ctrl+C to quit.")
 
         try:
             while True:
@@ -164,7 +177,7 @@ def main():
                 listener.stop()                   # mic off during thinking + speaking
 
                 if audio is None:
-                    speak("I didn't hear a question. Say Hello Claude to try again.")
+                    speak(f"I didn't hear a question. {retry_hint}")
                     continue
 
                 # ---- THINKING: pulse quickly. ----
@@ -187,7 +200,7 @@ def main():
                     continue
 
                 if not question:
-                    speak("I didn't catch that. Say Hello Claude and try again.")
+                    speak(f"I didn't catch that. {retry_hint}")
                     continue
                 print(f"You said: {question}")
 

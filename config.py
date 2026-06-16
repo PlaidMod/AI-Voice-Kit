@@ -40,6 +40,25 @@ WAKE_KEYWORD_PATH = os.environ.get(
 )
 # Microphone device index for PvRecorder. -1 = default device (usually correct).
 MIC_DEVICE_INDEX = int(os.environ.get("SCOUT_MIC_INDEX", "-1"))
+# Frame size used when the wake word is OFF (Porcupine picks its own otherwise).
+# 512 samples @ 16 kHz = 32 ms per read, the same cadence Porcupine uses.
+DEFAULT_FRAME_LENGTH = 512
+
+
+def wake_word_enabled():
+    """Whether to run the "Hello Claude" wake word, or fall back to button-only.
+
+    Defaults to "auto": the wake word turns itself on the moment BOTH a
+    Picovoice access key and the keyword (.ppn) file are present, so you can
+    enable it later just by adding them -- no code change needed. Force it
+    either way with SCOUT_WAKE_WORD=on / off.
+    """
+    setting = os.environ.get("SCOUT_WAKE_WORD", "auto").strip().lower()
+    if setting in ("on", "true", "1", "yes"):
+        return True
+    if setting in ("off", "false", "0", "no"):
+        return False
+    return bool(PICOVOICE_ACCESS_KEY) and os.path.exists(WAKE_KEYWORD_PATH)
 
 # --- Audio capture / end-of-speech detection ------------------------------
 SAMPLE_RATE = 16000           # Porcupine + Whisper + Resemblyzer all want 16 kHz
