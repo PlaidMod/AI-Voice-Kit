@@ -15,10 +15,13 @@ voice_id (speaker check), assistant (Gemini + tools), chats (memory),
 google_sync (Sheets). This file just orchestrates them.
 """
 
+import io
 import os
 import random
+import subprocess
 import sys
 import threading
+import wave
 
 from google import genai
 from google.genai import errors
@@ -32,23 +35,65 @@ import voice_id
 from assistant import ToolContext, respond
 from listener import Listener
 
-# --- Text-to-speech: AIY first, pyttsx3 as a fallback ----------------------
-# IMPORTANT: aiy.voice.tts imports cleanly even when its underlying `pico2wave`
-# binary is missing (common on a fresh 64-bit Raspberry Pi OS). The failure
-# only shows up when say() actually runs. So we guard the *call*, not just the
-# import, and fall back to pyttsx3 (espeak) so a TTS problem never crashes the
-# main loop -- worst case is a silent answer that still prints to the log.
+# --- Text-to-speech: Piper (neural) → AIY pico2wave → pyttsx3/espeak ------
+#
+# Piper gives the best voice by far. It auto-enables once you:
+#   pip install piper-tts
+#   mkdir -p ~/scout/piper-voices && cd ~/scout/piper-voices
+#   wget <en_US-lessac-medium.onnx>  (see setup notes)
+#
+# AIY pico2wave imports cleanly even when the binary is missing; failure shows
+# at call time, so we guard the call and fall through to pyttsx3.
+
+_piper_voice = None
+if os.path.exists(config.PIPER_MODEL_PATH):
+    try:
+        from piper.voice import PiperVoice as _PiperVoice
+        _piper_voice = _PiperVoice.load(config.PIPER_MODEL_PATH)
+        print(f"Piper TTS loaded: {os.path.basename(config.PIPER_MODEL_PATH)}")
+    except Exception as _e:
+        print(f"[Piper TTS unavailable: {_e}]")
+
 try:
     from aiy.voice import tts as _aiy_tts
     _aiy_say = _aiy_tts.say
-except Exception:  # aiy module unavailable (e.g. running off-device)
+except Exception:
     _aiy_say = None
 
 _pyttsx3_engine = None
 
 
+def _speak_piper(text):
+    """Synthesize with Piper to a temp WAV, then play it on the Voice HAT.
+
+    Piper's API changed between versions. Modern piper-tts (1.x) exposes
+    synthesize_wav(text, wav_file), which writes real audio frames AND sets the
+    WAV header itself. The legacy API used synthesize(text, wav_file) after the
+    caller set the header. We support both, and verify the file actually has
+    audio before playing so a silent synth surfaces instead of "playing" silence.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_path = f.name
+    try:
+        with wave.open(tmp_path, "wb") as wf:
+            if hasattr(_piper_voice, "synthesize_wav"):
+                _piper_voice.synthesize_wav(text, wf)        # piper-tts 1.x
+            else:                                            # legacy API
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(_piper_voice.config.sample_rate)
+                _piper_voice.synthesize(text, wf)
+        if os.path.getsize(tmp_path) <= 44:                  # header only = no audio
+            raise RuntimeError("Piper produced no audio frames")
+        subprocess.run(["aplay", "-q", "-D", "plughw:0,0", tmp_path],
+                       stderr=subprocess.DEVNULL)
+    finally:
+        os.unlink(tmp_path)
+
+
 def _speak_pyttsx3(text):
-    """Fallback voice via pyttsx3/espeak; engine is built lazily on first use."""
+    """Last-resort voice via pyttsx3/espeak; engine built lazily."""
     global _pyttsx3_engine
     if _pyttsx3_engine is None:
         import pyttsx3
@@ -59,7 +104,13 @@ def _speak_pyttsx3(text):
 
 
 def speak(text):
-    """Say text aloud. Prefer AIY TTS, fall back to pyttsx3, never crash."""
+    """Say text aloud. Prefer Piper neural TTS, then AIY, then pyttsx3."""
+    if _piper_voice is not None:
+        try:
+            _speak_piper(text)
+            return
+        except Exception as e:
+            print(f"  [Piper TTS failed: {e}]")
     if _aiy_say is not None:
         try:
             _aiy_say(text, lang="en-US", volume=70, pitch=130)
@@ -164,9 +215,11 @@ def main():
                 # ---- IDLE: pulse the LED to show we're available. ----
                 board.led.state = Led.PULSE_SLOW
                 button_event.clear()              # ignore any stale button press
-                listener.start()                  # mic on, only while we listen
+                if wake_on:
+                    listener.start()              # mic on for wake-word detection
                 trigger = listener.wait_for_trigger(button_event)
-                listener.stop()                   # mic off so the greeting isn't recorded
+                if wake_on:
+                    listener.stop()               # mic off so the greeting isn't recorded
 
                 # ---- GREET, then LISTEN for the question ----
                 board.led.state = Led.ON

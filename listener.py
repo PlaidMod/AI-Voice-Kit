@@ -87,14 +87,18 @@ class Listener:
         """
         Block until the wake word is heard OR the button is pressed.
 
-        Returns "wake" or "button". `button_event` is a threading.Event set by
-        the button thread in main.py. When the wake word is off, we just drain
-        the mic (so the buffer stays current) and wait for the button.
+        Returns "wake" or "button". In button-only mode (porcupine is None) we
+        block on the event directly -- no mic polling needed, which lets the LED
+        pulse thread run uninterrupted and keeps idle CPU near zero.
         """
+        if self.porcupine is None:
+            button_event.wait()
+            button_event.clear()
+            return "button"
         while True:
             frame = self.recorder.read()           # blocks ~32 ms per frame
-            if self.porcupine is not None and self.porcupine.process(frame) >= 0:
-                return "wake"                       # >= 0 means keyword detected
+            if self.porcupine.process(frame) >= 0:
+                return "wake"                      # >= 0 means keyword detected
             if button_event.is_set():
                 button_event.clear()
                 return "button"

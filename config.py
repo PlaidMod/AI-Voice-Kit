@@ -85,3 +85,12 @@ CONVERSATIONS_DIR = os.path.join(BASE_DIR, "conversations")
 
 # --- The spoken personality / rules ---------------------------------------
 SYSTEM_PROMPT_PATH = os.path.join(BASE_DIR, "system_prompt.txt")
+
+# --- Piper neural TTS (much better voice than pico2wave / espeak) ---------
+# Drop en_US-lessac-medium.onnx + its .json sidecar into ~/scout/piper-voices/
+# and pip install piper-tts, then Scout will use it automatically.
+# Override the model path with SCOUT_PIPER_MODEL.
+PIPER_MODEL_PATH = os.environ.get(
+    "SCOUT_PIPER_MODEL",
+    os.path.join(BASE_DIR, "piper-voices", "en_US-lessac-medium.onnx")
+)
