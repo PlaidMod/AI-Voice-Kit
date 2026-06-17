@@ -276,6 +276,7 @@ def main():
                     print(f"You said: {question}")
                     answer = respond(client, system_prompt, current.messages, question, ctx)
                 except errors.APIError as e:
+                    print(f"[API ERROR] code={getattr(e, 'code', None)} message={e}")
                     err_str = str(e).lower()
                     if getattr(e, "code", None) == 429 or "resource_exhausted" in err_str:
                         # Distinguish daily quota (RPD) from per-minute rate limit (RPM).
