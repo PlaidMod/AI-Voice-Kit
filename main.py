@@ -276,11 +276,23 @@ def main():
                     print(f"You said: {question}")
                     answer = respond(client, system_prompt, current.messages, question, ctx)
                 except errors.APIError as e:
-                    if getattr(e, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e):
-                        usage.mark_exhausted()
-                        print("Gemini free daily quota exhausted (429).")
-                        speak("You've used all of today's free Gemini credits. "
-                              "They reset tomorrow, so I can't answer until then.")
+                    err_str = str(e).lower()
+                    if getattr(e, "code", None) == 429 or "resource_exhausted" in err_str:
+                        # Distinguish daily quota (RPD) from per-minute rate limit (RPM).
+                        # RPD message contains "quota" or "daily"; RPM contains "rate".
+                        is_daily = "daily" in err_str or (
+                            "quota" in err_str and "rate" not in err_str
+                        )
+                        if is_daily:
+                            usage.mark_exhausted()
+                            print("Gemini free daily quota exhausted (429).")
+                            speak("You've used all of today's free Gemini credits. "
+                                  "They reset tomorrow, so I can't answer until then.")
+                        else:
+                            print("Gemini rate limit (RPM) hit — waiting 60 s.")
+                            speak("I'm being asked questions too quickly. Give me a moment.")
+                            import time
+                            time.sleep(60)
                     else:
                         print(f"Gemini API error: {e}")
                         speak("I had trouble reaching the assistant. Please try again.")
