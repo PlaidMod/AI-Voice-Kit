@@ -34,7 +34,7 @@ import chats
 import usage
 import voice_id
 import volume
-from assistant import ToolContext, respond, transcribe
+from assistant import ToolContext, respond
 from listener import Listener
 
 # --- Text-to-speech: Piper (neural) → AIY pico2wave → pyttsx3/espeak ------
@@ -266,29 +266,28 @@ def main():
                           "They reset tomorrow, so try me again then.")
                     continue
 
-                # ---- TRANSCRIBE with Gemini, then ASK Gemini (web search + tools). ----
+                # ---- One Gemini call: audio in, answer + transcript out. ----
                 ctx = ToolContext()
                 try:
                     import time as _time
                     t0 = _time.monotonic()
-                    question = transcribe(client, audio, config.SAMPLE_RATE)
+                    answer, heard = respond(
+                        client, system_prompt, current.messages,
+                        audio, ctx, sample_rate=config.SAMPLE_RATE,
+                    )
                     t1 = _time.monotonic()
-                    print(f"[transcribe {t1-t0:.1f}s]")
-                    if not question:
-                        speak(f"I didn't catch that. {retry_hint}")
-                        continue
-                    print(f"You said: {question}")
-                    answer = respond(client, system_prompt, current.messages, question, ctx)
-                    t2 = _time.monotonic()
-                    print(f"[respond {t2-t1:.1f}s]")
+                    print(f"[respond {t1-t0:.1f}s]")
+                    if heard:
+                        print(f"You said: {heard}")
                 except errors.APIError as e:
                     print(f"[API ERROR] code={getattr(e, 'code', None)} message={e}")
                     err_str = str(e).lower()
                     if getattr(e, "code", None) == 429 or "resource_exhausted" in err_str:
-                        # Distinguish daily quota (RPD) from per-minute rate limit (RPM).
-                        # RPD message contains "quota" or "daily"; RPM contains "rate".
-                        is_daily = "daily" in err_str or (
-                            "quota" in err_str and "rate" not in err_str
+                        # Check the message body only (not URLs which contain "rate-limits").
+                        # RPD says "daily" or "your current quota"; RPM says "rate limit".
+                        msg_body = err_str.split("https://")[0]
+                        is_daily = "daily" in msg_body or (
+                            "quota" in msg_body and "rate" not in msg_body
                         )
                         if is_daily:
                             usage.mark_exhausted()
@@ -296,17 +295,16 @@ def main():
                             speak("You've used all of today's free Gemini credits. "
                                   "They reset tomorrow, so I can't answer until then.")
                         else:
-                            print("Gemini rate limit (RPM) hit — waiting 60 s.")
+                            print("Gemini rate limit hit — waiting 60 s.")
                             speak("I'm being asked questions too quickly. Give me a moment.")
-                            import time
-                            time.sleep(60)
+                            _time.sleep(60)
                     else:
                         print(f"Gemini API error: {e}")
                         speak("I had trouble reaching the assistant. Please try again.")
                     continue
 
                 # Save this Q&A into the active conversation.
-                current.add_turn(question, answer)
+                current.add_turn(heard or "", answer)
                 chats.save(current)
 
                 # ---- SPEAK the answer. ----
