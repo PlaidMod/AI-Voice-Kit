@@ -34,7 +34,7 @@ import chats
 import usage
 import voice_id
 import volume
-from assistant import ToolContext, respond
+from assistant import ToolContext, respond, transcribe
 from listener import Listener
 
 # --- Text-to-speech: Piper (neural) → AIY pico2wave → pyttsx3/espeak ------
@@ -266,19 +266,21 @@ def main():
                           "They reset tomorrow, so try me again then.")
                     continue
 
-                # ---- One Gemini call: audio in, answer + transcript out. ----
+                # ---- TRANSCRIBE with Gemini, then ASK Gemini. ----
                 ctx = ToolContext()
                 try:
                     import time as _time
                     t0 = _time.monotonic()
-                    answer, heard = respond(
-                        client, system_prompt, current.messages,
-                        audio, ctx, sample_rate=config.SAMPLE_RATE,
-                    )
+                    question = transcribe(client, audio, config.SAMPLE_RATE)
                     t1 = _time.monotonic()
-                    print(f"[respond {t1-t0:.1f}s]")
-                    if heard:
-                        print(f"You said: {heard}")
+                    print(f"[transcribe {t1-t0:.1f}s]")
+                    if not question:
+                        speak(f"I didn't catch that. {retry_hint}")
+                        continue
+                    print(f"You said: {question}")
+                    answer = respond(client, system_prompt, current.messages, question, ctx)
+                    t2 = _time.monotonic()
+                    print(f"[respond {t2-t1:.1f}s]")
                 except errors.APIError as e:
                     print(f"[API ERROR] code={getattr(e, 'code', None)} message={e}")
                     err_str = str(e).lower()
@@ -304,7 +306,7 @@ def main():
                     continue
 
                 # Save this Q&A into the active conversation.
-                current.add_turn(heard or "", answer)
+                current.add_turn(question, answer)
                 chats.save(current)
 
                 # ---- SPEAK the answer. ----

@@ -154,8 +154,8 @@ def _thinking_config():
     return None
 
 
-def _audio_to_wav_bytes(audio, sample_rate):
-    """Convert a mono float32 [-1, 1] numpy array to raw WAV bytes."""
+def transcribe(client, audio, sample_rate):
+    """Transcribe a mono float32 [-1, 1] clip with Gemini; return plain text."""
     import io
     import wave
     import numpy as np
@@ -167,7 +167,24 @@ def _audio_to_wav_bytes(audio, sample_rate):
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
         wf.writeframes(pcm)
-    return buf.getvalue()
+
+    audio_part = types.Part.from_bytes(data=buf.getvalue(), mime_type="audio/wav")
+    instruction = (
+        "Transcribe the user's spoken question from this audio, in English. "
+        "Return ONLY the exact words spoken -- no quotes, labels, or commentary. "
+        "If there is no clear speech, return nothing."
+    )
+    cfg = types.GenerateContentConfig(
+        thinking_config=_thinking_config(),
+        temperature=0.0,
+    )
+    response = _generate(
+        client,
+        model=config.MODEL,
+        contents=[instruction, audio_part],
+        config=cfg,
+    )
+    return (response.text or "").strip()
 
 
 def _grounded_search(client, query):
@@ -245,14 +262,9 @@ def _text_from(parts):
     return "".join(p.text for p in (parts or []) if getattr(p, "text", None)).strip()
 
 
-def respond(client, system_prompt, base_messages, audio_or_text, ctx, sample_rate=None):
+def respond(client, system_prompt, base_messages, question, ctx):
     """
-    Ask Gemini and return (answer_text, transcript).
-
-    `audio_or_text` is either a numpy float32 audio array (combined STT+answer
-    in one API call) or a plain string question.  Pass `sample_rate` when
-    providing audio.  Returns a tuple (answer: str, heard: str | None) so the
-    caller can print what was heard without a separate transcription request.
+    Ask Gemini and return the final spoken answer text.
 
     `base_messages` is the current chat's simple history (a list of
     {"role", "content"} dicts, where role is "user" or "assistant"). We map it
@@ -262,22 +274,11 @@ def respond(client, system_prompt, base_messages, audio_or_text, ctx, sample_rat
     """
     dated_prompt = f"Today's date is {date.today():%A, %B %d, %Y}.\n\n{system_prompt}"
 
-    if isinstance(audio_or_text, str):
-        user_parts = [types.Part(text=audio_or_text)]
-        heard = audio_or_text
-    else:
-        wav_bytes = _audio_to_wav_bytes(audio_or_text, sample_rate)
-        user_parts = [
-            types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav"),
-            types.Part(text="Answer the spoken question above."),
-        ]
-        heard = None  # we don't know the transcript yet
-
     contents = []
     for msg in base_messages:
         role = "model" if msg["role"] == "assistant" else "user"
         contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
-    contents.append(types.Content(role="user", parts=user_parts))
+    contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
 
     cfg = types.GenerateContentConfig(
         system_instruction=dated_prompt,
@@ -294,8 +295,7 @@ def respond(client, system_prompt, base_messages, audio_or_text, ctx, sample_rat
 
         calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
         if not calls:
-            answer = _text_from(parts) or "I'm not sure how to answer that. Could you rephrase?"
-            return answer, heard
+            return _text_from(parts) or "I'm not sure how to answer that. Could you rephrase?"
 
         # Keep the model's tool-call turn, then answer each call it made.
         contents.append(candidate.content)
@@ -308,4 +308,4 @@ def respond(client, system_prompt, base_messages, audio_or_text, ctx, sample_rat
             )
         contents.append(types.Content(role="user", parts=result_parts))
 
-    return "I got a bit stuck working through that. Mind asking it a different way?", heard
+    return "I got a bit stuck working through that. Mind asking it a different way?"
