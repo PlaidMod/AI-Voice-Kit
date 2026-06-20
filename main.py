@@ -269,12 +269,18 @@ def main():
                 # ---- TRANSCRIBE with Gemini, then ASK Gemini (web search + tools). ----
                 ctx = ToolContext()
                 try:
+                    import time as _time
+                    t0 = _time.monotonic()
                     question = transcribe(client, audio, config.SAMPLE_RATE)
+                    t1 = _time.monotonic()
+                    print(f"[transcribe {t1-t0:.1f}s]")
                     if not question:
                         speak(f"I didn't catch that. {retry_hint}")
                         continue
                     print(f"You said: {question}")
                     answer = respond(client, system_prompt, current.messages, question, ctx)
+                    t2 = _time.monotonic()
+                    print(f"[respond {t2-t1:.1f}s]")
                 except errors.APIError as e:
                     print(f"[API ERROR] code={getattr(e, 'code', None)} message={e}")
                     err_str = str(e).lower()
