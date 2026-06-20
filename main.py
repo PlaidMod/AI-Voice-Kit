@@ -283,27 +283,26 @@ def main():
                     print(f"[respond {t2-t1:.1f}s]")
                 except errors.APIError as e:
                     print(f"[API ERROR] code={getattr(e, 'code', None)} message={e}")
-                    err_str = str(e).lower()
-                    if getattr(e, "code", None) == 429 or "resource_exhausted" in err_str:
-                        # Check the message body only (not URLs which contain "rate-limits").
-                        # RPD says "daily" or "your current quota"; RPM says "rate limit".
-                        msg_body = err_str.split("https://")[0]
-                        is_daily = "daily" in msg_body or (
-                            "quota" in msg_body and "rate" not in msg_body
-                        )
-                        if is_daily:
+                    if getattr(e, "code", None) == 429 or "resource_exhausted" in str(e).lower():
+                        # Google returns the same 429 message for both RPM and RPD limits.
+                        # Strategy: wait 60 s and retry once. If it fails again, it's RPD.
+                        print("429 received — waiting 60 s then retrying once.")
+                        speak("One moment, I hit a rate limit.")
+                        _time.sleep(60)
+                        try:
+                            answer = respond(client, system_prompt, current.messages, question, ctx)
+                            t2 = _time.monotonic()
+                            print(f"[respond (retry) {t2-t1:.1f}s]")
+                        except errors.APIError:
                             usage.mark_exhausted()
-                            print("Gemini free daily quota exhausted (429).")
+                            print("Still failing after retry — daily quota exhausted.")
                             speak("You've used all of today's free Gemini credits. "
                                   "They reset tomorrow, so I can't answer until then.")
-                        else:
-                            print("Gemini rate limit hit — waiting 60 s.")
-                            speak("I'm being asked questions too quickly. Give me a moment.")
-                            _time.sleep(60)
+                            continue
                     else:
                         print(f"Gemini API error: {e}")
                         speak("I had trouble reaching the assistant. Please try again.")
-                    continue
+                        continue
 
                 # Save this Q&A into the active conversation.
                 current.add_turn(question, answer)
