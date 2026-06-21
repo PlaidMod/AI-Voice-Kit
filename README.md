@@ -205,10 +205,8 @@ speaker strictness, TTS voice, playback device, and volume limits. See
 
 ## To do
 
-- Record a short demo video and add a photo of the assembled device.
 - Re-enable the wake word (needs a Picovoice keyword file).
 - Cut transcription latency further.
-- A small web view for saved opportunities.
 
 ## License
 
