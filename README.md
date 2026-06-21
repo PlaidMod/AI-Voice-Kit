@@ -24,6 +24,45 @@ time** so it starts replying before it has finished thinking.
 
 ---
 
+## 🔧 The starting point: a kit that no longer worked
+
+<p align="center">
+  <img src="docs/voice-kit.jpg" alt="The Google AIY Voice Kit V1 components, unassembled" width="680">
+  <br>
+  <em>What I started with — the AIY Voice Kit V1: folded cardboard panels, a
+  speaker, an arcade button, the Voice HAT board, a mic daughterboard, and a
+  handful of cables.</em>
+</p>
+
+This is the whole kit, fresh out of the box. Google sold it in 2017 with exactly
+one purpose: a guided, follow-the-instructions demo of **Google Assistant**.
+
+There was a catch. The kit's software depended on Google's Assistant SDK, which
+**Google has since retired** — its apt repository now 404s and the library it
+relied on is gone. Follow the original instructions today and you hit a dead end:
+the cloud service it talked to no longer exists. The kit had become, effectively,
+a cardboard box of e-waste.
+
+So I rebuilt it — not the cardboard, the brain. Rather than try to restore what it
+used to do, I wrote an entirely new software stack that makes this hardware do far
+more than Google ever shipped:
+
+| The kit as designed (2017) | What I turned it into |
+|---|---|
+| One hardcoded skill: talk to Google Assistant | A general assistant powered by Google Gemini with live tool use |
+| Cloud dependency now shut down — won't run at all | Runs today on modern 64-bit Raspberry Pi OS |
+| Anyone could talk to it | Speaker verification — answers only its owner |
+| No memory between questions | Persistent, multi-conversation memory |
+| Couldn't act on the world | Searches the live web and saves opportunities to Google Sheets |
+| Robotic, canned text-to-speech | Streaming neural TTS that replies as it thinks |
+
+None of this came from a tutorial — the tutorial's finish line was removed. Every
+piece of the pipeline in this repo is something I designed, wrote, and debugged on
+real hardware to bring a discontinued device back to life as something genuinely
+useful.
+
+---
+
 ## 🎬 Demo
 
 > _Add a short clip or photo of the device here — e.g. `docs/demo.gif` or a
