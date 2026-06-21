@@ -1,185 +1,265 @@
-# Scout — AIY Voice Kit V1 Opportunity Scout
+# Scout 🛰️ — A Voice Assistant I Built on a Raspberry Pi
 
-A custom voice assistant for the **Google AIY Voice Kit V1** (Raspberry Pi 3B +
-Voice HAT). It replaces the retired Google Assistant with **Claude** and live
-**web search**, tuned to help a high school student find research, internships,
-competitions, and summer programs — plus research companies for cold outreach
-and rubber-duck debug coding problems.
+> An always-listening, AI-powered voice assistant that runs on a $50 Raspberry Pi
+> and helps a high-school student discover research, internships, competitions,
+> and scholarships — by voice, hands-free, in real time.
 
-**How it works:** press and hold the button → talk → release → it transcribes
-your speech locally with Whisper, asks Claude (with web search), and speaks back
-a tight 3–5 bullet answer.
+<p>
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white">
+  <img alt="Raspberry Pi" src="https://img.shields.io/badge/Raspberry%20Pi-3B-A22846?logo=raspberrypi&logoColor=white">
+  <img alt="Google Gemini" src="https://img.shields.io/badge/Google%20Gemini-3.1%20Flash--Lite-4285F4?logo=google&logoColor=white">
+  <img alt="Piper TTS" src="https://img.shields.io/badge/TTS-Piper%20Neural-6f42c1">
+  <img alt="Status" src="https://img.shields.io/badge/status-working%20on%20hardware-success">
+</p>
+
+Scout takes a retired **Google AIY Voice Kit V1** — a cardboard Raspberry Pi
+speaker kit whose original Google Assistant software was shut down — and brings it
+back to life with a modern, cloud-AI pipeline I designed and wrote from scratch.
+
+Press the button (or say a wake word), ask a question out loud, and Scout
+verifies it's really me speaking, transcribes my speech in the cloud, reasons
+with Google Gemini, searches the live web when it needs current facts, saves good
+opportunities to a Google Sheet, and **speaks the answer back one sentence at a
+time** so it starts replying before it has finished thinking.
+
+---
+
+## 🎬 Demo
+
+> _Add a short clip or photo of the device here — e.g. `docs/demo.gif` or a
+> link to a 30-second YouTube demo. A real recording of the button → answer
+> loop is the single most convincing thing on this page._
 
 ```
-Button press ─► LED on ─► record ─► Whisper (local) ─► Claude + web search ─► speak ─► LED off
+$ python main.py
+Piper TTS loaded: en_US-lessac-low.onnx
+Idle. Press the button to talk. Ctrl+C to quit.
+
+[button] Listening...
+[transcribe 2.1s]
+You said: Find aerospace research programs for high school sophomores in Texas.
+[respond 3.4s, first chunk 1.2s]
+Scout: The Texas A&M Aerospace summer research camp accepts sophomores...
 ```
 
 ---
 
-## 1. What you need
+## ✨ What it does
 
-- Assembled **AIY Voice Kit V1** running the **AIY system image** (Raspbian-based, Python 3).
-- The kit working: speaker plays sound, button + LED respond, mics record.
-- An **Anthropic API key** — get one at https://console.anthropic.com (Settings → API Keys).
-- Internet access on the Pi (web search needs it).
-
-> Quick hardware check (on the Pi): the AIY image ships with demo scripts under
-> `~/AIY-projects-python/src/examples/`. Run the button + audio demos there first
-> to confirm the hardware works before setting up Scout.
-
----
-
-## 2. Get the files onto the Pi
-
-Copy this folder (`main.py`, `system_prompt.txt`, `requirements.txt`,
-`README.md`) to the Pi, e.g. to `/home/pi/scout/`. You can use a USB drive,
-`scp`, or `git clone` if you put it in a repo.
-
-```bash
-# Example with scp, run from your computer:
-scp -r "Anthropic Voice Kit"/* pi@raspberrypi.local:/home/pi/scout/
-```
+- **Hands-free Q&A by voice** — button or optional "Hello Claude" wake word, a
+  spoken greeting, then natural-language questions and spoken answers.
+- **Speaker verification** — a voiceprint check means Scout only answers its
+  owner, and politely refuses anyone else.
+- **Live web search** — Gemini calls a Google-Search-grounded tool for anything
+  time-sensitive (deadlines, openings, prices) instead of guessing from stale
+  training data, and names its sources out loud.
+- **Saves opportunities to Google Sheets** — "save that one" appends the program,
+  deadline, eligibility, and a link to a spreadsheet via the Sheets API.
+- **Conversational memory** — every chat is stored as JSON; you can ask Scout to
+  list past conversations, continue an old one, or start fresh.
+- **Voice-controlled volume** — "turn it up," "set volume to 70 percent."
+- **Free-tier aware** — tracks daily API usage locally and warns before the free
+  quota runs out, so it never silently dies mid-conversation.
 
 ---
 
-## 3. Install dependencies
+## 🏗️ Architecture
 
-SSH into the Pi (or open a terminal on it) and run:
+Scout is a small **event loop** that wires together five subsystems — audio
+capture, speaker ID, speech-to-text, an LLM reasoning layer with tools, and
+neural text-to-speech — each isolated in its own module.
 
-```bash
-cd /home/pi/scout
-sudo apt-get update
-sudo apt-get install -y ffmpeg        # Whisper needs ffmpeg to read audio
-pip3 install -r requirements.txt
+```mermaid
+flowchart LR
+    A([Button / Wake word]) --> B[Mic capture<br/>PvRecorder + RMS endpointing]
+    B --> C{Speaker<br/>verification<br/>Resemblyzer}
+    C -- not the owner --> R[Refuse politely]
+    C -- owner --> D[Speech-to-text<br/>Gemini cloud STT]
+    D --> E[Reasoning<br/>Gemini + function tools]
+    E -- needs live facts --> F[(Google Search<br/>grounding)]
+    F --> E
+    E -- tool call --> T[Sheets · chat memory · volume]
+    T --> E
+    E -- streamed sentences --> G[Piper neural TTS]
+    G --> H([Speaker])
 ```
 
-Heads-up: `openai-whisper` pulls in PyTorch, which is **large and slow** to
-install on a Pi 3B (can take 20–40 minutes). Let it finish.
+**Why it's built this way:**
 
-> **If Whisper is too slow on your Pi:** the `tiny` model is much faster than
-> `base`. Change `WHISPER_MODEL = "base"` to `"tiny"` near the top of `main.py`.
-> For a big speed-up you can later switch to `faster-whisper`, but `openai-whisper`
-> is the simplest to start with.
+- The reasoning layer uses **manual function-calling** so the Pi stays in control
+  of every side effect (web search, saving to Sheets, switching chats, volume).
+- `web_search` is itself a function tool whose handler makes a *separate*,
+  grounding-only Gemini call. This sidesteps a real API constraint — Gemini can't
+  combine built-in Search grounding with custom function tools in one request —
+  so each call uses *either* grounding *or* tools, never both, and search only
+  runs when the model actually asks for it (which conserves the free quota).
+- The answer is **streamed and spoken sentence-by-sentence on a background
+  thread**, so synthesis and playback of the first sentence overlap generation of
+  the rest. Audio starts ~1 second after the model replies instead of after the
+  whole answer is synthesized.
 
 ---
 
-## 4. Put your Anthropic API key on the device
+## 🔁 How one question flows
 
-Scout reads the key from the `ANTHROPIC_API_KEY` environment variable. **Don't
-paste the key into the code** — keep it out of the source files.
-
-The simplest reliable way is a small env file that only your user can read:
-
-```bash
-# Create a protected file holding the key
-echo 'ANTHROPIC_API_KEY=sk-ant-your-real-key-here' > /home/pi/scout/scout.env
-chmod 600 /home/pi/scout/scout.env
-```
-
-To run it by hand in a terminal, load that file first:
-
-```bash
-cd /home/pi/scout
-set -a; . ./scout.env; set +a     # loads ANTHROPIC_API_KEY into this shell
-python3 main.py
-```
-
-You should hear "Scout is ready." Hold the button, ask something like
-*"Find rocketry summer programs for high school sophomores in Houston,"* and
-release.
+1. **Trigger** — a background thread watches the physical button; an optional
+   Porcupine wake word can trigger hands-free.
+2. **Capture** — PvRecorder streams mic frames; a simple RMS energy threshold
+   detects when I start and stop talking (endpointing), with a rolling
+   pre-buffer so the first word isn't clipped.
+3. **Verify** — Resemblyzer turns the clip into a voice embedding and compares it
+   (cosine similarity) to my enrolled voiceprint. No match → refuse.
+4. **Transcribe** — the clip is packed into an in-memory WAV and sent to Gemini
+   for cloud speech-to-text (replacing on-device Whisper, which was far too slow
+   on a Pi 3B).
+5. **Reason** — the transcript plus chat history go to Gemini with a personalized
+   system prompt and four function tools. A bounded tool loop runs any calls.
+6. **Search (if needed)** — a grounded Gemini call fetches live facts and source
+   titles, which the model weaves into its answer.
+7. **Speak** — the answer streams back as sentences; each is cleaned of markdown,
+   volume-adjusted, synthesized by Piper, and played on the Voice HAT.
 
 ---
 
-## 5. Run automatically at boot with systemd
+## 🧰 Tech stack
 
-Once it works by hand, make it start on boot.
-
-Create the service file:
-
-```bash
-sudo nano /etc/systemd/system/scout.service
-```
-
-Paste this (adjust paths/username if you didn't use `/home/pi/scout`):
-
-```ini
-[Unit]
-Description=Scout AIY Voice Assistant
-After=network-online.target sound.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/scout
-# Load the API key from the protected env file
-EnvironmentFile=/home/pi/scout/scout.env
-ExecStart=/usr/bin/python3 /home/pi/scout/main.py
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable scout.service     # start on every boot
-sudo systemctl start scout.service      # start it now
-```
-
-Useful commands:
-
-```bash
-sudo systemctl status scout.service     # is it running?
-journalctl -u scout.service -f          # watch live logs (what it heard, etc.)
-sudo systemctl restart scout.service    # restart after editing main.py
-sudo systemctl stop scout.service       # stop it
-```
+| Layer | Choice | Notes |
+|---|---|---|
+| **Language** | Python 3.13 | Standard-library-first; small, readable modules. |
+| **AI / reasoning** | Google **Gemini** (`google-genai` SDK) | Model is configurable via `SCOUT_MODEL`; default `gemini-3.1-flash-lite`. |
+| **Speech-to-text** | Gemini cloud STT | Audio sent as an inline WAV part; ~2 s vs ~30 s for local Whisper. |
+| **Text-to-speech** | **Piper** neural TTS | ONNX voice model running on ARM CPU; streamed per sentence. |
+| **Speaker ID** | **Resemblyzer** | Voice embedding + cosine-similarity threshold. |
+| **Wake word** | **Porcupine** (optional) | Auto-enables when a key + keyword file are present; button works either way. |
+| **Mic capture** | **PvRecorder** | One library owns the mic for both idle and capture. |
+| **Integrations** | Google Sheets API, Google Search grounding | OAuth desktop credentials; secrets kept out of source. |
+| **Hardware** | Raspberry Pi 3B + AIY Voice HAT | 1 GB RAM, quad-core ARM, single mic + speaker. |
 
 ---
 
-## 6. Using Scout
+## 📁 Project structure
 
-- **Hold the button** while you talk, **release** when done.
-- Answers are 3–5 spoken bullets and always end with *"Want me to go deeper on
-  any of these?"* — just press the button again and say *"yes, more on the
-  second one"* to follow up. Scout remembers the recent conversation.
-- Try these:
-  - "Find research or internship programs for high school students into aerospace, remote is fine."
-  - "Tell me about Firefly Aerospace so I can cold-email them, and give me an email hook."
-  - "My Python loop prints the same value every time — help me debug it." (It will ask you a question back.)
-  - "What rocketry competitions can a sophomore enter this year?"
-
----
-
-## 7. Tuning (all near the top of `main.py`)
-
-| Setting | What it does |
+| File | Responsibility |
 |---|---|
-| `MODEL` | Which Claude model to use (`claude-sonnet-4-6` by default). |
-| `WHISPER_MODEL` | `"tiny"` (fastest) or `"base"` (more accurate). |
-| `MAX_RECORD_SECONDS` | Safety cap on recording length. |
-| `MAX_TOKENS` | Max length of Claude's reply (kept small for speed). |
-| `MAX_WEB_SEARCHES` | How many searches Claude may run per question. |
-| `MAX_HISTORY_MESSAGES` | How much conversation to remember before resetting. |
-
-To change Scout's personality or rules, edit **`system_prompt.txt`** — no code
-changes needed.
+| [`main.py`](main.py) | The event loop: LEDs, greeting, capture, the speak-as-you-stream TTS worker, error/rate-limit handling. |
+| [`assistant.py`](assistant.py) | Gemini integration — cloud STT, the streaming tool loop, grounded `web_search`, and all tool definitions. |
+| [`listener.py`](listener.py) | Mic ownership, optional wake word, and RMS-based end-of-speech detection. |
+| [`voice_id.py`](voice_id.py) | Resemblyzer speaker verification against the enrolled voiceprint. |
+| [`chats.py`](chats.py) | JSON conversation memory (list / load / continue / new). |
+| [`google_sync.py`](google_sync.py) · [`google_auth.py`](google_auth.py) | Saving opportunities to Google Sheets. |
+| [`usage.py`](usage.py) | Local daily request counter + free-tier warnings. |
+| [`volume.py`](volume.py) | Voice-controlled software volume gain, persisted to disk. |
+| [`config.py`](config.py) | One place for every setting; almost all overridable by env var. |
+| [`enroll.py`](enroll.py) | One-time owner voiceprint enrollment. |
+| [`system_prompt.txt`](system_prompt.txt) | Scout's personality and rules — editable without touching code. |
 
 ---
 
-## 8. Troubleshooting
+## 🧗 Engineering challenges I solved
 
-- **"ANTHROPIC_API_KEY is not set"** — the env file wasn't loaded. For manual
-  runs use the `set -a; . ./scout.env; set +a` line; for systemd check the
-  `EnvironmentFile=` path.
-- **No sound / can't record** — re-run the AIY hardware demos; Scout can't fix a
-  hardware/config problem.
-- **Whisper errors about audio** — make sure `ffmpeg` is installed (`apt-get install ffmpeg`).
-- **It's slow** — switch `WHISPER_MODEL` to `"tiny"`, lower `MAX_WEB_SEARCHES`,
-  and keep questions short. The Pi 3B is the bottleneck, not the network.
-- **Watch what it's doing** — `journalctl -u scout.service -f` prints what it
-  heard and what it answered.
+This kit is discontinued hardware running on a modern OS, so a lot of the work was
+making old assumptions meet new reality. A few highlights:
+
+- **30-second latency → ~2 seconds.** On-device Whisper took ~30 s per question
+  and ate the Pi's 1 GB of RAM. I moved speech-to-text to a cloud Gemini call and
+  freed the memory entirely.
+- **Answers that start instantly.** Even a fast model feels slow if you wait for a
+  whole paragraph to synthesize. I stream the model's response and feed complete
+  sentences to a background TTS worker, so the first sentence plays while the rest
+  is still being generated.
+- **A real API constraint.** Gemini can't mix built-in Search grounding with
+  custom function tools in a single request. I made `web_search` a function tool
+  that internally fires a separate grounding-only call — keeping all my tools
+  *and* live search, without ever violating the constraint.
+- **Rate limits that lied.** Google returns the *same* `429` message for both
+  per-minute and per-day limits. An early version mis-read a temporary
+  per-minute limit as "out of credits for the day" and locked itself out. I
+  rewrote the handler to fail soft and never falsely block.
+- **Fitting on a Pi 3B.** PyTorch (~426 MB) overflowed the Pi's 453 MB `/tmp`
+  during install; I worked around it with cache/`TMPDIR` redirection. Dropped a
+  hard `numpy<2` pin that had no Python 3.13 wheel.
+- **Reviving dead hardware.** The official AIY apt repo is gone (404), so the
+  board library is built from GitHub source; the Voice HAT soundcard is enabled
+  by hand in `config.txt`; everything runs in a venv to satisfy PEP 668.
+- **Graceful degradation.** TTS falls back Piper → pico2wave → espeak; the wake
+  word silently disables to button-only if no key is present; a missing voiceprint
+  warns instead of crashing. The assistant tries hard never to die mid-sentence.
+
+---
+
+## 🔒 Security & privacy
+
+- **No secrets in the repo.** The Gemini API key is read from an environment
+  variable; Google OAuth credentials/tokens and the personal voiceprint are all
+  git-ignored.
+- On the device, secrets live in `/etc/scout.env` (`chmod 600`) and are loaded by
+  the systemd service via `EnvironmentFile=`.
+- Speaker verification means the device won't answer strangers.
+- The system prompt includes child-safety guidance (the end user is a minor):
+  flag scams, never repeat sensitive personal data, and suggest looping in an
+  adult for anything involving money or signups.
+
+---
+
+## 🚀 Running it yourself
+
+> Built for an assembled AIY Voice Kit V1 on 64-bit Raspberry Pi OS. Full setup
+> notes (systemd service, hardware config, OAuth) are inline in the code and
+> config; the short version:
+
+```bash
+# 1. Create a virtualenv (PEP 668 blocks global pip on modern Pi OS)
+python3 -m venv ~/aiy_env && source ~/aiy_env/bin/activate
+
+# 2. Install dependencies
+pip install --no-cache-dir -r requirements.txt
+
+# 3. Add your key (kept out of source control)
+echo 'GEMINI_API_KEY=AIza...your-key' | sudo tee /etc/scout.env >/dev/null
+echo 'SCOUT_MODEL=gemini-3.1-flash-lite' | sudo tee -a /etc/scout.env >/dev/null
+sudo chmod 600 /etc/scout.env
+
+# 4. Enroll your voice (one time)
+python enroll.py
+
+# 5. Run
+set -a && source /etc/scout.env && set +a
+python main.py
+```
+
+A `scout.service` systemd unit (using the venv's Python and the `/etc/scout.env`
+file) makes it start on boot.
+
+### Configuration
+
+Almost everything is tunable via environment variables — model, daily quota,
+energy threshold, speaker strictness, TTS voice, playback device, volume limits.
+See [`config.py`](config.py) for the full list.
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] Record a real demo video / add device photos.
+- [ ] Re-enable the "Hello Claude" wake word (needs a Picovoice keyword file).
+- [ ] Cut transcription latency further (streaming or on-device STT).
+- [ ] A small web dashboard for saved opportunities.
+- [ ] Package the systemd unit + first-run setup into one script.
+
+---
+
+## 🎓 What I learned
+
+Building Scout end-to-end meant owning the whole stack: real-time audio capture
+and endpointing, speaker recognition with embeddings, integrating a multimodal
+LLM with tool use and live web grounding, designing for hard memory/CPU limits,
+handling flaky networks and ambiguous API errors gracefully, keeping secrets out
+of source control, and shipping it as a service that survives reboots. It started
+as a dead cardboard speaker and became a system I actually use.
+
+---
+
+## 📄 License
+
+Released under the MIT License — feel free to learn from it. Add a `LICENSE` file
+with your name to make it official.
