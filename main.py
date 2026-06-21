@@ -18,10 +18,14 @@ file just orchestrates them.
 
 import io
 import os
+import queue
 import random
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import wave
 
 from google import genai
@@ -34,7 +38,7 @@ import chats
 import usage
 import voice_id
 import volume
-from assistant import ToolContext, respond, transcribe
+from assistant import ToolContext, respond_stream, transcribe
 from listener import Listener
 
 # --- Text-to-speech: Piper (neural) → AIY pico2wave → pyttsx3/espeak ------
@@ -65,32 +69,41 @@ except Exception:
 _pyttsx3_engine = None
 
 
-def _speak_piper(text):
-    """Synthesize with Piper to a temp WAV, then play it on the Voice HAT.
+def _piper_synth_to_wav(text, path):
+    """Synthesize `text` with Piper into the WAV file at `path`.
 
     Piper's API changed between versions. Modern piper-tts (1.x) exposes
     synthesize_wav(text, wav_file), which writes real audio frames AND sets the
     WAV header itself. The legacy API used synthesize(text, wav_file) after the
     caller set the header. We support both, and verify the file actually has
-    audio before playing so a silent synth surfaces instead of "playing" silence.
+    audio so a silent synth surfaces instead of "playing" silence.
     """
-    import tempfile
+    with wave.open(path, "wb") as wf:
+        if hasattr(_piper_voice, "synthesize_wav"):
+            _piper_voice.synthesize_wav(text, wf)            # piper-tts 1.x
+        else:                                                # legacy API
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(_piper_voice.config.sample_rate)
+            _piper_voice.synthesize(text, wf)
+    if os.path.getsize(path) <= 44:                          # header only = no audio
+        raise RuntimeError("Piper produced no audio frames")
+
+
+def _play_wav(path):
+    """Apply the current volume gain and play a WAV on the Voice HAT."""
+    _apply_gain(path, volume.get())
+    subprocess.run(["aplay", "-q", "-D", config.PLAYBACK_DEVICE, path],
+                   stderr=subprocess.DEVNULL)
+
+
+def _speak_piper(text):
+    """Synthesize with Piper to a temp WAV, then play it on the Voice HAT."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         tmp_path = f.name
     try:
-        with wave.open(tmp_path, "wb") as wf:
-            if hasattr(_piper_voice, "synthesize_wav"):
-                _piper_voice.synthesize_wav(text, wf)        # piper-tts 1.x
-            else:                                            # legacy API
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(_piper_voice.config.sample_rate)
-                _piper_voice.synthesize(text, wf)
-        if os.path.getsize(tmp_path) <= 44:                  # header only = no audio
-            raise RuntimeError("Piper produced no audio frames")
-        _apply_gain(tmp_path, volume.get())                  # voice-set volume
-        subprocess.run(["aplay", "-q", "-D", config.PLAYBACK_DEVICE, tmp_path],
-                       stderr=subprocess.DEVNULL)
+        _piper_synth_to_wav(text, tmp_path)
+        _play_wav(tmp_path)
     finally:
         os.unlink(tmp_path)
 
@@ -148,6 +161,77 @@ GREETINGS = [
     "Hey, I'm listening.",
 ]
 
+# --- Background TTS worker ------------------------------------------------
+# Speaking happens on its own thread so that while one sentence is being
+# synthesized and played, the main thread can keep pulling the next sentence
+# off Gemini's response stream. That overlap is what makes answers feel fast.
+_speech_queue = queue.Queue()
+_speech_worker = None
+
+
+def _speech_loop():
+    while True:
+        text = _speech_queue.get()
+        try:
+            speak(text)
+        except Exception as e:
+            print(f"  [speech worker error: {e}]")
+        finally:
+            _speech_queue.task_done()
+
+
+def enqueue_speech(text):
+    """Queue a chunk of text to be spoken in the background, in order."""
+    global _speech_worker
+    if _speech_worker is None:
+        _speech_worker = threading.Thread(target=_speech_loop, daemon=True)
+        _speech_worker.start()
+    _speech_queue.put(text)
+
+
+def wait_for_speech():
+    """Block until every queued chunk has finished playing."""
+    _speech_queue.join()
+
+
+# --- Pre-rendered greetings ----------------------------------------------
+# The greeting is the same handful of fixed phrases, so synthesize them once at
+# startup. On a button press we just play the cached WAV (instant) instead of
+# making Piper synthesize from scratch (which was the button -> greeting lag).
+_greeting_wavs = []
+
+
+def precache_greetings():
+    if _piper_voice is None:
+        return
+    for g in GREETINGS:
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                path = f.name
+            _piper_synth_to_wav(g, path)
+            _greeting_wavs.append(path)
+        except Exception as e:
+            print(f"  [greeting cache failed for {g!r}: {e}]")
+
+
+def speak_greeting():
+    """Play a random pre-rendered greeting; fall back to live synthesis."""
+    if not _greeting_wavs:
+        speak(random.choice(GREETINGS))
+        return
+    src = random.choice(_greeting_wavs)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp = f.name
+    try:
+        shutil.copy(src, tmp)
+        _play_wav(tmp)            # applies current volume gain, then plays
+    except Exception as e:
+        print(f"  [greeting playback failed: {e}]")
+        speak(random.choice(GREETINGS))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
 REFUSAL = ("Unfortunately I cannot answer this question. "
            "The question can only be answered if the user permits.")
 
@@ -159,6 +243,11 @@ def clean_for_speech(text):
     text = re.sub(r"^\s*[-•]\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"\n{2,}", "\n", text)
     return text.strip()
+
+
+def is_quota_error(e):
+    """True if a Gemini APIError is a 429 / rate-limit / quota error."""
+    return getattr(e, "code", None) == 429 or "resource_exhausted" in str(e).lower()
 
 
 def start_button_thread(board, button_event):
@@ -202,6 +291,9 @@ def main():
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
+    # Render the fixed greetings once so a button press greets instantly.
+    precache_greetings()
+
     # Speech-to-text runs in the cloud via Gemini (see assistant.transcribe) --
     # far faster and more accurate on a Pi 3B than loading Whisper locally.
 
@@ -239,7 +331,7 @@ def main():
 
                 # ---- GREET, then LISTEN for the question ----
                 board.led.state = Led.ON
-                speak(random.choice(GREETINGS))
+                speak_greeting()
                 print(f"\n[{trigger}] Listening...")
                 listener.start()                  # fresh buffer -> no greeting echo
                 audio = listener.capture_utterance()
@@ -266,52 +358,58 @@ def main():
                           "They reset tomorrow, so try me again then.")
                     continue
 
-                # ---- TRANSCRIBE with Gemini, then ASK Gemini. ----
+                # ---- TRANSCRIBE with Gemini. ----
                 ctx = ToolContext()
                 try:
-                    import time as _time
-                    t0 = _time.monotonic()
+                    t0 = time.monotonic()
                     question = transcribe(client, audio, config.SAMPLE_RATE)
-                    t1 = _time.monotonic()
-                    print(f"[transcribe {t1-t0:.1f}s]")
-                    if not question:
-                        speak(f"I didn't catch that. {retry_hint}")
-                        continue
-                    print(f"You said: {question}")
-                    answer = respond(client, system_prompt, current.messages, question, ctx)
-                    t2 = _time.monotonic()
-                    print(f"[respond {t2-t1:.1f}s]")
+                    print(f"[transcribe {time.monotonic()-t0:.1f}s]")
                 except errors.APIError as e:
-                    print(f"[API ERROR] code={getattr(e, 'code', None)} message={e}")
-                    if getattr(e, "code", None) == 429 or "resource_exhausted" in str(e).lower():
-                        # Google returns the same 429 message for both RPM and RPD limits.
-                        # Strategy: wait 60 s and retry once. If it fails again, it's RPD.
-                        print("429 received — waiting 60 s then retrying once.")
-                        speak("One moment, I hit a rate limit.")
-                        _time.sleep(60)
-                        try:
-                            answer = respond(client, system_prompt, current.messages, question, ctx)
-                            t2 = _time.monotonic()
-                            print(f"[respond (retry) {t2-t1:.1f}s]")
-                        except errors.APIError:
-                            usage.mark_exhausted()
-                            print("Still failing after retry — daily quota exhausted.")
-                            speak("You've used all of today's free Gemini credits. "
-                                  "They reset tomorrow, so I can't answer until then.")
-                            continue
+                    print(f"[API ERROR / transcribe] {e}")
+                    if is_quota_error(e):
+                        speak("I hit Google's rate limit. Give me a minute, then ask again.")
                     else:
-                        print(f"Gemini API error: {e}")
                         speak("I had trouble reaching the assistant. Please try again.")
+                    continue
+
+                if not question:
+                    speak(f"I didn't catch that. {retry_hint}")
+                    continue
+                print(f"You said: {question}")
+
+                # ---- STREAM the answer: speak each sentence as it's generated. ----
+                board.led.state = Led.ON
+                t1 = time.monotonic()
+                answer = ""
+                first_chunk_at = None
+                try:
+                    for chunk in respond_stream(client, system_prompt,
+                                                current.messages, question, ctx):
+                        if first_chunk_at is None:
+                            first_chunk_at = time.monotonic() - t1
+                        answer += (" " if answer else "") + chunk
+                        enqueue_speech(clean_for_speech(chunk))
+                    wait_for_speech()
+                    print(f"[respond {time.monotonic()-t1:.1f}s, "
+                          f"first chunk {first_chunk_at or 0:.1f}s]")
+                except errors.APIError as e:
+                    wait_for_speech()
+                    print(f"[API ERROR / respond] {e}")
+                    if not answer:
+                        if is_quota_error(e):
+                            speak("I hit Google's rate limit. Give me a minute, then ask again.")
+                        else:
+                            speak("I had trouble reaching the assistant. Please try again.")
                         continue
+                    print("[kept the part that was already spoken]")
+
+                if not answer:
+                    continue
 
                 # Save this Q&A into the active conversation.
                 current.add_turn(question, answer)
                 chats.save(current)
-
-                # ---- SPEAK the answer. ----
                 print(f"Scout: {answer}")
-                board.led.state = Led.ON
-                speak(clean_for_speech(answer))
 
                 # ---- Heads-up as the free daily quota runs low. ----
                 if usage.should_announce_warning():

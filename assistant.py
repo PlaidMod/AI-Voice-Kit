@@ -262,23 +262,119 @@ def _text_from(parts):
     return "".join(p.text for p in (parts or []) if getattr(p, "text", None)).strip()
 
 
-def respond(client, system_prompt, base_messages, question, ctx):
-    """
-    Ask Gemini and return the final spoken answer text.
-
-    `base_messages` is the current chat's simple history (a list of
-    {"role", "content"} dicts, where role is "user" or "assistant"). We map it
-    to Gemini's Content list (assistant -> "model"), then grow it with the
-    model's tool calls and our results; only the final answer text gets saved
-    back into history (in main.py).
-    """
-    dated_prompt = f"Today's date is {date.today():%A, %B %d, %Y}.\n\n{system_prompt}"
-
+def _build_contents(base_messages, question):
+    """Map simple history + the new question to Gemini's Content list."""
     contents = []
     for msg in base_messages:
         role = "model" if msg["role"] == "assistant" else "user"
         contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
     contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
+    return contents
+
+
+def _flush_sentences(buf):
+    """Pull complete, speakable chunks out of a growing text buffer.
+
+    Splits on a newline or sentence-ending punctuation so we can speak each
+    bullet/sentence the moment it's fully generated. Returns (chunks, leftover).
+    """
+    import re
+
+    chunks = []
+    while True:
+        nl = buf.find("\n")
+        m = re.search(r"[.!?](\s|$)", buf)
+        punct = m.start() + 1 if m else -1
+        cuts = [i for i in (nl, punct) if i != -1]
+        if not cuts:
+            break
+        cut = min(cuts)
+        piece = buf[: cut + 1]
+        buf = buf[cut + 1:]
+        piece = re.sub(r"^[\s*\-•#`>]+", "", piece).strip()
+        if piece:
+            chunks.append(piece)
+    return chunks, buf
+
+
+def respond_stream(client, system_prompt, base_messages, question, ctx):
+    """
+    Ask Gemini and YIELD the answer as speakable sentence chunks.
+
+    Same tool loop as respond(), but the final answer is streamed so the caller
+    can synthesize and play each sentence as it arrives -- overlapping Gemini's
+    generation with text-to-speech for a much faster perceived response. Tool
+    rounds (web_search, etc.) produce no spoken text and are not yielded.
+
+    May raise google.genai.errors.APIError (e.g. a 429); the caller handles it.
+    """
+    dated_prompt = f"Today's date is {date.today():%A, %B %d, %Y}.\n\n{system_prompt}"
+    contents = _build_contents(base_messages, question)
+
+    cfg = types.GenerateContentConfig(
+        system_instruction=dated_prompt,
+        tools=[FUNCTION_TOOLS],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        thinking_config=_thinking_config(),
+        max_output_tokens=config.MAX_TOKENS,
+    )
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        stream = client.models.generate_content_stream(
+            model=config.MODEL, contents=contents, config=cfg
+        )
+        calls = []
+        pending = ""          # text not yet flushed as a sentence
+        spoke_any = False
+        for chunk in stream:
+            cand = (chunk.candidates or [None])[0]
+            if cand is None or cand.content is None:
+                continue
+            for p in (cand.content.parts or []):
+                if getattr(p, "function_call", None):
+                    calls.append(p.function_call)
+                elif getattr(p, "text", None):
+                    pending += p.text
+                    ready, pending = _flush_sentences(pending)
+                    for s in ready:
+                        spoke_any = True
+                        yield s
+        usage.record()        # one stream == one request against the quota
+
+        if not calls:
+            tail = pending.strip()
+            if tail:
+                yield tail
+            elif not spoke_any:
+                yield "I'm not sure how to answer that. Could you rephrase?"
+            return
+
+        # Tool round: replay the model's calls, run them, feed back results.
+        contents.append(
+            types.Content(role="model",
+                          parts=[types.Part(function_call=fc) for fc in calls])
+        )
+        result_parts = []
+        for fc in calls:
+            args = dict(fc.args) if fc.args else {}
+            output = _run_tool(client, fc.name, args, ctx)
+            result_parts.append(
+                types.Part.from_function_response(name=fc.name, response={"result": output})
+            )
+        contents.append(types.Content(role="user", parts=result_parts))
+
+    yield "I got a bit stuck working through that. Mind asking it a different way?"
+
+
+def respond(client, system_prompt, base_messages, question, ctx):
+    """
+    Ask Gemini and return the final spoken answer text (non-streaming).
+
+    Kept for the rate-limit retry path in main.py; the normal flow uses
+    respond_stream() so audio can start before the whole answer is generated.
+    """
+    dated_prompt = f"Today's date is {date.today():%A, %B %d, %Y}.\n\n{system_prompt}"
+    contents = _build_contents(base_messages, question)
 
     cfg = types.GenerateContentConfig(
         system_instruction=dated_prompt,
