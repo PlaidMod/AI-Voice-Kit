@@ -1,8 +1,8 @@
 # Scout — A Voice Assistant I Built on a Raspberry Pi
 
 > An always-listening, AI-powered voice assistant that runs on a $50 Raspberry Pi
-> and helps a high-school student discover research, internships, competitions,
-> and scholarships — by voice, hands-free, in real time.
+> and helps students discover research, internships, competitions,
+> and scholarships — by voice, hands-free, in real time. (_Co-authored by Anthropic_)
 
 <p>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white">
